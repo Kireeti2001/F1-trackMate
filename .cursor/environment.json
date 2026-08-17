@@ -1,0 +1,12 @@
+{
+  "name": "F1 TrackMate",
+  "user": "ubuntu",
+  "install": "npm ci",
+  "terminals": [
+    {
+      "name": "dev",
+      "command": "npm run dev"
+    }
+  ],
+  "ports": [3000]
+}
