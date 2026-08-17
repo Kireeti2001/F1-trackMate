@@ -34,16 +34,16 @@ export default function Strategy({ strategy }: { strategy: DriverStints }) {
             return (
               <motion.div
                 key={i}
-                className="strat-stint"
-                style={{ width: `${width}%`, ["--cc" as string]: c.color }}
-                initial={{ scaleX: 0, opacity: 0 }}
-                whileInView={{ scaleX: 1, opacity: 1 }}
+                className="strat-seg"
+                style={{ ["--cc" as string]: c.color }}
+                initial={{ width: "0%" }}
+                whileInView={{ width: `${width}%` }}
                 viewport={{ once: true, margin: "-60px" }}
-                transition={{ duration: 0.7, ease: [0.16, 1, 0.3, 1], delay: 0.15 + i * 0.12 }}
+                transition={{ duration: 0.7, ease: [0.16, 1, 0.3, 1], delay: 0.15 + i * 0.14 }}
               >
                 <span className="strat-badge">{c.short}</span>
                 <span className="strat-info">
-                  <b>{s.compound}</b>
+                  <b>{s.compound === "UNKNOWN" ? "Unknown" : s.compound}</b>
                   <em className="mono">
                     L{s.lapStart}&ndash;{s.lapEnd} · {laps} laps
                   </em>
@@ -51,6 +51,10 @@ export default function Strategy({ strategy }: { strategy: DriverStints }) {
               </motion.div>
             );
           })}
+        </div>
+        <div className="strat-axis mono">
+          <span>Lap 1</span>
+          <span>Lap {total}</span>
         </div>
       </Reveal>
     </section>
