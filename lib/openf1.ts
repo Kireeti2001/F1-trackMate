@@ -1,9 +1,7 @@
-// Server-side client for the OpenF1 API (https://openf1.org).
-// Fetching is separated from the pure transforms so the transforms can be
-// exercised offline (see openf1.selfcheck.ts). All data here is historical for a
-// completed session, so responses are cached aggressively.
-
-const BASE = "https://api.openf1.org/v1";
+// Types + pure transforms for the OpenF1 API (https://openf1.org).
+// Transforms are network-free so they can be exercised offline
+// (see openf1.selfcheck.ts). Fetching happens client-side through the
+// /api/f1 proxy (see lib/f1client.ts).
 
 export type Driver = {
   number: number;
@@ -14,7 +12,13 @@ export type Driver = {
   headshot: string;
 };
 
-export type ClassificationRow = { position: number; driver: Driver };
+export type ClassificationRow = {
+  position: number;
+  driver: Driver;
+  gap?: string; // "+12.4s", "+1 LAP", "DNF" …
+  points?: number;
+  laps?: number;
+};
 
 export type TelemetrySample = {
   t: number; // seconds since lap start
@@ -48,6 +52,49 @@ export type Weather = {
   pressure: number;
 };
 
+export type WeatherPoint = { t: number; track: number; air: number };
+
+export type PitStop = { driver: Driver; lap: number; duration: number };
+
+export type RaceControlMsg = {
+  date: string;
+  lap: number;
+  category: string;
+  flag: string | null;
+  scope: string | null;
+  message: string;
+  driverNumber: number | null;
+};
+
+export type RadioClip = { driver: Driver; date: string; url: string };
+
+export type PosSample = { t: number; position: number }; // t = minutes since session start
+export type DriverPositions = { driver: Driver; points: PosSample[]; final: number };
+
+export type TrackPoint = { x: number; y: number; z: number };
+
+export type Meeting = {
+  key: number;
+  name: string;
+  officialName: string;
+  circuit: string;
+  country: string;
+  countryCode: string;
+  flag: string;
+  circuitImage: string;
+  dateStart: string;
+  year: number;
+};
+
+export type SessionInfo = {
+  key: number;
+  meetingKey: number;
+  name: string;
+  type: string;
+  dateStart: string;
+  dateEnd: string;
+};
+
 export type SessionMeta = {
   meetingName: string;
   officialName: string;
@@ -61,15 +108,6 @@ export type SessionMeta = {
   year: number;
   sessionKey: number;
   meetingKey: number;
-};
-
-export type RaceData = {
-  session: SessionMeta;
-  classification: ClassificationRow[];
-  fastestLap: FastestLap | null;
-  pace: DriverLaps[];
-  strategy: DriverStints | null;
-  weather: Weather | null;
 };
 
 // ---------------------------------------------------------------------------
@@ -105,6 +143,10 @@ const UNKNOWN_DRIVER: Driver = {
   headshot: "",
 };
 
+export function lookupDriver(drivers: Map<number, Driver>, num: number): Driver {
+  return drivers.get(num) ?? { ...UNKNOWN_DRIVER, number: num, acronym: `#${num}` };
+}
+
 // Latest recorded position per driver → final classification, sorted.
 export function finalClassification(
   positions: any[],
@@ -120,8 +162,38 @@ export function finalClassification(
     if (!prev || date > prev.date) latest.set(num, { position: pos, date });
   }
   return [...latest.entries()]
-    .map(([num, { position }]) => ({ position, driver: drivers.get(num) ?? { ...UNKNOWN_DRIVER, number: num } }))
+    .map(([num, { position }]) => ({ position, driver: lookupDriver(drivers, num) }))
     .sort((a, b) => a.position - b.position);
+}
+
+// gap_to_leader can be a number (seconds), a string ("+1 LAP") or, for
+// qualifying, an array of per-segment values. Reduce it to a display string.
+export function formatGap(raw: any, status?: { dnf?: boolean; dns?: boolean; dsq?: boolean }): string {
+  if (status?.dsq) return "DSQ";
+  if (status?.dns) return "DNS";
+  if (status?.dnf) return "DNF";
+  const val = Array.isArray(raw) ? [...raw].reverse().find((v) => v != null) : raw;
+  if (val == null) return "—";
+  if (typeof val === "number") return val === 0 ? "Leader" : `+${val.toFixed(3)}s`;
+  return String(val);
+}
+
+// session_result rows → classification with gaps/points, falling back to
+// nothing when the endpoint is empty (older sessions).
+export function resultsClassification(
+  sessionResult: any[],
+  drivers: Map<number, Driver>,
+): ClassificationRow[] {
+  return (sessionResult ?? [])
+    .filter((r) => r?.driver_number != null)
+    .map((r) => ({
+      position: Number(r.position) || 0,
+      driver: lookupDriver(drivers, Number(r.driver_number)),
+      gap: formatGap(r.gap_to_leader, r),
+      points: typeof r.points === "number" ? r.points : undefined,
+      laps: Number(r.number_of_laps) || undefined,
+    }))
+    .sort((a, b) => (a.position || 99) - (b.position || 99));
 }
 
 function isRacingLap(lap: any): boolean {
@@ -176,7 +248,7 @@ export function paceSeries(
     const fastest = Math.min(...own.map((l) => l.time));
     // Drop laps slower than 130% of the driver's fastest (SC / traffic) to keep the trend readable.
     const clean = own.filter((l) => l.time <= fastest * 1.3);
-    out.push({ driver: drivers.get(num) ?? { ...UNKNOWN_DRIVER, number: num }, laps: clean, fastest });
+    out.push({ driver: lookupDriver(drivers, num), laps: clean, fastest });
   }
   return out;
 }
@@ -194,6 +266,13 @@ export function driverStints(stints: any[], driverNumber: number, driver: Driver
   return { driver, stints: own, totalLaps };
 }
 
+// Stint timelines for every classified driver, in finishing order.
+export function allStints(stints: any[], order: ClassificationRow[]): DriverStints[] {
+  return order
+    .map((row) => driverStints(stints, row.driver.number, row.driver))
+    .filter((d) => d.stints.length > 0);
+}
+
 export function latestWeather(weather: any[]): Weather | null {
   if (!weather?.length) return null;
   const w = weather.reduce((a, b) => (String(a?.date) > String(b?.date) ? a : b));
@@ -207,103 +286,165 @@ export function latestWeather(weather: any[]): Weather | null {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Fetching
-// ---------------------------------------------------------------------------
-
-async function api(path: string): Promise<any[]> {
-  const res = await fetch(`${BASE}${path}`, {
-    headers: { Accept: "application/json" },
-    next: { revalidate: 3600 },
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) throw new Error(`OpenF1 ${res.status} for ${path}`);
-  const json = await res.json();
-  return Array.isArray(json) ? json : [];
+// Track/air temperature over the session, minutes since first sample.
+export function weatherTimeline(weather: any[]): WeatherPoint[] {
+  const rows = (weather ?? [])
+    .filter((w) => w?.date && w?.track_temperature != null)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  if (!rows.length) return [];
+  const t0 = Date.parse(rows[0].date);
+  return rows.map((w) => ({
+    t: (Date.parse(w.date) - t0) / 60000,
+    track: Number(w.track_temperature) || 0,
+    air: Number(w.air_temperature) || 0,
+  }));
 }
 
-async function safe<T>(fn: () => Promise<T>, fallback: T): Promise<T> {
-  try {
-    return await fn();
-  } catch {
-    return fallback;
+// Pit-lane stops, fastest first.
+export function pitStopTable(pit: any[], drivers: Map<number, Driver>): PitStop[] {
+  return (pit ?? [])
+    .filter((p) => Number(p?.pit_duration) > 0 && p?.driver_number != null)
+    .map((p) => ({
+      driver: lookupDriver(drivers, Number(p.driver_number)),
+      lap: Number(p.lap_number) || 0,
+      duration: Number(p.pit_duration),
+    }))
+    .sort((a, b) => a.duration - b.duration);
+}
+
+// Race-control feed, newest first.
+export function raceControlFeed(raw: any[]): RaceControlMsg[] {
+  return (raw ?? [])
+    .filter((m) => m?.message)
+    .map((m) => ({
+      date: String(m.date ?? ""),
+      lap: Number(m.lap_number) || 0,
+      category: String(m.category ?? "Other"),
+      flag: m.flag ? String(m.flag) : null,
+      scope: m.scope ? String(m.scope) : null,
+      message: String(m.message),
+      driverNumber: m.driver_number != null ? Number(m.driver_number) : null,
+    }))
+    .sort((a, b) => b.date.localeCompare(a.date));
+}
+
+// Team-radio clips, newest first, capped so the grid stays digestible.
+export function teamRadioClips(raw: any[], drivers: Map<number, Driver>, limit = 24): RadioClip[] {
+  return (raw ?? [])
+    .filter((r) => r?.recording_url)
+    .map((r) => ({
+      driver: lookupDriver(drivers, Number(r.driver_number)),
+      date: String(r.date ?? ""),
+      url: String(r.recording_url),
+    }))
+    .sort((a, b) => b.date.localeCompare(a.date))
+    .slice(0, limit);
+}
+
+// Position-vs-time step series for the given drivers (minutes since start).
+export function positionTimeline(
+  positions: any[],
+  drivers: Map<number, Driver>,
+  driverNumbers: number[],
+): DriverPositions[] {
+  const sorted = (positions ?? [])
+    .filter((p) => p?.date && p?.driver_number != null && p?.position != null)
+    .sort((a, b) => String(a.date).localeCompare(String(b.date)));
+  if (!sorted.length) return [];
+  const t0 = Date.parse(sorted[0].date);
+  const byDriver = new Map<number, PosSample[]>();
+  for (const p of sorted) {
+    const num = Number(p.driver_number);
+    if (!driverNumbers.includes(num)) continue;
+    const arr = byDriver.get(num) ?? [];
+    arr.push({ t: (Date.parse(p.date) - t0) / 60000, position: Number(p.position) });
+    byDriver.set(num, arr);
   }
+  return driverNumbers
+    .filter((num) => byDriver.has(num))
+    .map((num) => {
+      const points = byDriver.get(num)!;
+      return { driver: lookupDriver(drivers, num), points, final: points[points.length - 1].position };
+    });
 }
 
-async function getSessionMeta(): Promise<SessionMeta> {
-  const [session] = await api(`/sessions?session_key=latest`);
-  if (!session) throw new Error("No latest session available from OpenF1");
-  const [meeting] = await api(`/meetings?meeting_key=${session.meeting_key}`);
+// Normalise raw car-location samples into a centred, unit-scaled 3D path for
+// the track map. Downsamples to ~`maxPoints` and closes the loop.
+export function trackPath(locations: any[], maxPoints = 360): TrackPoint[] {
+  const pts = (locations ?? [])
+    .filter((l) => l?.x != null && l?.y != null)
+    .map((l) => ({ x: Number(l.x), y: Number(l.y), z: Number(l.z) || 0 }));
+  if (pts.length < 8) return [];
+  const step = Math.max(1, Math.floor(pts.length / maxPoints));
+  const sampled = pts.filter((_, i) => i % step === 0);
+  const xs = sampled.map((p) => p.x);
+  const ys = sampled.map((p) => p.y);
+  const zs = sampled.map((p) => p.z);
+  const cx = (Math.min(...xs) + Math.max(...xs)) / 2;
+  const cy = (Math.min(...ys) + Math.max(...ys)) / 2;
+  const cz = (Math.min(...zs) + Math.max(...zs)) / 2;
+  const span = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys), 1);
+  // World layout: track plane on XZ, elevation (F1 z) becomes Y with gentle exaggeration.
+  return sampled.map((p) => ({
+    x: (p.x - cx) / span,
+    y: ((p.z - cz) / span) * 0.6,
+    z: -(p.y - cy) / span,
+  }));
+}
+
+export function toMeeting(raw: any): Meeting {
   return {
-    meetingName: meeting?.meeting_name ?? session.circuit_short_name ?? "Grand Prix",
-    officialName: meeting?.meeting_official_name ?? "",
-    sessionName: session.session_name ?? "Session",
-    circuit: session.circuit_short_name ?? meeting?.circuit_short_name ?? "",
-    country: session.country_name ?? meeting?.country_name ?? "",
-    countryCode: session.country_code ?? "",
-    flag: meeting?.country_flag ?? "",
-    circuitImage: meeting?.circuit_image ?? "",
-    date: session.date_start ?? "",
-    year: Number(session.year) || new Date().getFullYear(),
-    sessionKey: Number(session.session_key),
-    meetingKey: Number(session.meeting_key),
+    key: Number(raw?.meeting_key) || 0,
+    name: raw?.meeting_name ?? "Grand Prix",
+    officialName: raw?.meeting_official_name ?? "",
+    circuit: raw?.circuit_short_name ?? "",
+    country: raw?.country_name ?? "",
+    countryCode: raw?.country_code ?? "",
+    flag: raw?.country_flag ?? "",
+    circuitImage: raw?.circuit_image ?? "",
+    dateStart: raw?.date_start ?? "",
+    year: Number(raw?.year) || 0,
   };
 }
 
-export async function getRaceData(): Promise<RaceData> {
-  const session = await getSessionMeta();
-  const sk = session.sessionKey;
-
-  const [rawDrivers, positions, laps, weather, stints] = await Promise.all([
-    safe(() => api(`/drivers?session_key=${sk}`), [] as any[]),
-    safe(() => api(`/position?session_key=${sk}`), [] as any[]),
-    safe(() => api(`/laps?session_key=${sk}`), [] as any[]),
-    safe(() => api(`/weather?session_key=${sk}`), [] as any[]),
-    safe(() => api(`/stints?session_key=${sk}`), [] as any[]),
-  ]);
-
-  const drivers = driverMap(rawDrivers);
-  const classification = finalClassification(positions, drivers);
-  const topNumbers = classification.slice(0, 5).map((c) => c.driver.number);
-
-  const pace = paceSeries(laps, drivers, topNumbers);
-
-  // Fastest lap of the race → telemetry trace.
-  let fastestLap: FastestLap | null = null;
-  const best = fastestLapAcross(laps);
-  if (best) {
-    const startMs = Date.parse(best.date_start);
-    const endISO = new Date(startMs + (best.lap_duration + 3) * 1000).toISOString();
-    const carData = await safe(
-      () =>
-        api(
-          `/car_data?session_key=${sk}&driver_number=${best.driver_number}` +
-            `&date>${encodeURIComponent(best.date_start)}&date<${encodeURIComponent(endISO)}`,
-        ),
-      [] as any[],
-    );
-    const samples = telemetrySamples(carData, best.date_start);
-    fastestLap = {
-      driver: drivers.get(best.driver_number) ?? { ...UNKNOWN_DRIVER, number: best.driver_number },
-      lapNumber: best.lap_number,
-      lapTime: best.lap_duration,
-      topSpeed: samples.length ? Math.max(...samples.map((s) => s.speed)) : 0,
-      samples,
-    };
-  }
-
-  const winnerNum = classification[0]?.driver.number;
-  const strategy =
-    winnerNum != null
-      ? driverStints(stints, winnerNum, classification[0].driver)
-      : null;
-
+export function toSessionInfo(raw: any): SessionInfo {
   return {
-    session,
-    classification,
-    fastestLap,
-    pace,
-    strategy,
-    weather: latestWeather(weather),
+    key: Number(raw?.session_key) || 0,
+    meetingKey: Number(raw?.meeting_key) || 0,
+    name: raw?.session_name ?? "Session",
+    type: raw?.session_type ?? "",
+    dateStart: raw?.date_start ?? "",
+    dateEnd: raw?.date_end ?? "",
   };
+}
+
+export function sessionMeta(meeting: Meeting, session: SessionInfo): SessionMeta {
+  return {
+    meetingName: meeting.name,
+    officialName: meeting.officialName,
+    sessionName: session.name,
+    circuit: meeting.circuit,
+    country: meeting.country,
+    countryCode: meeting.countryCode,
+    flag: meeting.flag,
+    circuitImage: meeting.circuitImage,
+    date: session.dateStart,
+    year: meeting.year,
+    sessionKey: session.key,
+    meetingKey: meeting.key,
+  };
+}
+
+export function isLiveSession(session: SessionInfo, now = Date.now()): boolean {
+  const start = Date.parse(session.dateStart);
+  const end = Date.parse(session.dateEnd);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return false;
+  // Small buffer after the end for the flag + in-lap.
+  return now >= start && now <= end + 20 * 60 * 1000;
+}
+
+export function formatLapTime(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = (sec - m * 60).toFixed(3).padStart(6, "0");
+  return `${m}:${s}`;
 }

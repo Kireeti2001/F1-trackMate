@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { Sora } from "next/font/google";
+import { Instrument_Serif, Sora, IBM_Plex_Mono } from "next/font/google";
 import "./globals.css";
 
 const sora = Sora({
@@ -9,15 +9,30 @@ const sora = Sora({
   display: "swap",
 });
 
+const serif = Instrument_Serif({
+  subsets: ["latin"],
+  weight: "400",
+  style: ["normal", "italic"],
+  variable: "--font-serif",
+  display: "swap",
+});
+
+const mono = IBM_Plex_Mono({
+  subsets: ["latin"],
+  weight: ["400", "500"],
+  variable: "--font-plex-mono",
+  display: "swap",
+});
+
 export const metadata: Metadata = {
-  title: "F1 TrackMate — Race Telemetry",
+  title: "TrackMate — F1 Race Intelligence",
   description:
-    "An immersive Formula 1 analytics experience: live classification, fastest-lap telemetry, race pace, and strategy, powered by OpenF1.",
+    "An interactive Formula 1 dashboard: classification, position battles, telemetry, tyre strategy, pit stops, team radio, race control and live weather — powered by OpenF1.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en" className={sora.variable}>
+    <html lang="en" className={`${sora.variable} ${serif.variable} ${mono.variable}`}>
       <body>{children}</body>
     </html>
   );
