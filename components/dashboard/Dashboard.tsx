@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { AnimatePresence, motion, useScroll, useSpring } from "motion/react";
 import { DashboardProvider, useDashboard } from "@/lib/dashboard";
 import Cursor from "./Cursor";
@@ -42,11 +42,16 @@ function Splash({ label }: { label: string }) {
 
 function Shell() {
   const { bundle, loading, error, meta } = useDashboard();
-  // Collapse preference persists across visits; guarded for prerendering.
-  const [collapsed, setCollapsed] = useState(
-    () => typeof window !== "undefined" && localStorage.getItem("trackmate-sidebar") === "1",
-  );
+  const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
+
+  // Apply the saved collapse preference after hydration; reading localStorage
+  // during the initial render caused a server/client HTML mismatch.
+  useEffect(() => {
+    if (localStorage.getItem("trackmate-sidebar") !== "1") return;
+    const raf = requestAnimationFrame(() => setCollapsed(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
   const { scrollYProgress } = useScroll();
   const progress = useSpring(scrollYProgress, { stiffness: 140, damping: 26, mass: 0.4 });
 
